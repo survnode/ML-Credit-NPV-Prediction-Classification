@@ -1,0 +1,420 @@
+---
+title: "Credit analysis"
+output: html_notebook
+---
+
+```{r}
+# Importing the Libraries
+rm(list=ls())
+library(pacman)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+p_load(tidyverse,caret,ROCR,FNN,forecast)
+```
+```{r}
+# Import csv file
+Credit <- read.csv(file.choose())
+#View(Credit)
+```
+```{r}
+#Define the categorical variables 
+Credit$GENDER<-factor(Credit$GENDER)
+Credit$CHK_ACCT<-factor(Credit$CHK_ACCT)
+Credit$SAV_ACCT<-factor(Credit$SAV_ACCT)
+Credit$HISTORY<-factor(Credit$HISTORY)
+Credit$PRESENT_RESIDENT<-factor(Credit$PRESENT_RESIDENT)
+Credit$EMPLOYMENT<-factor(Credit$EMPLOYMENT)
+Credit$JOB<-factor(Credit$JOB)
+Credit$TYPE<-factor(Credit$TYPE)
+```
+
+```{r}
+# Inspect the data
+#sapply(Credit, class)
+#Convert amount requested credit extended and npv to numeric
+#Replace comma values
+i <- c("AMOUNT_REQUESTED", "CREDIT_EXTENDED", "NPV") 
+Credit[i] <- lapply(Credit[i], gsub, pattern = ",", replacement = "")
+#Transform to numeric
+Credit[i] <- lapply(Credit[i], FUN = function(x){as.numeric(x)})
+sapply(Credit, class)
+
+```
+```{r}
+#Create a new categorical variable if new credit 
+#extension will result in a positive NPV
+Credit <- Credit %>% mutate (IsProfitable=ifelse(NPV>0,1,0))
+head(Credit$IsProfitable)
+```
+```{r}
+# total number of columns
+j <- ncol(Credit)
+j
+```
+
+```{r}
+#Create dummy variables and replace all categorical columns 
+Credit <- fastDummies::dummy_cols(Credit, select_columns = c('GENDER','CHK_ACCT','SAV_ACCT','HISTORY','PRESENT_RESIDENT','EMPLOYMENT','JOB','TYPE'), remove_selected_columns = TRUE)
+
+
+# total number of columns
+k <- ncol(Credit)
+k
+```
+
+```{r}
+# Data set split
+set.seed(1)
+Train <- Credit %>% sample_frac(0.7) 
+Validation <- Credit %>% anti_join(Train, by="OBS") 
+```
+```{r}
+# create new normalized training and validation sets
+Train.n <- Train
+Validation.n <- Validation
+
+#Create a normalization function to eliminate potental data bias due to the scale 
+# differences in the categorical and continuous variables.
+normalize <- function(x) {
+return ((x - min(x)) / (max(x) - min(x))) }
+
+#Normalize dummy variables
+j = j+1 #one column shift right where dummy variables start
+j = j-8 # subtract the number of dropped columns
+cols <- c(j: k)
+Train.n[cols] <- lapply(Train.n[cols], normalize)
+Validation.n[cols] <- lapply(Validation.n[cols], normalize)
+
+```
+
+```{r}
+#Use all variables apart from OBS, CREDIT_EXTENDED, and NPV
+knn_data <-c(2:14,18:k)
+```
+```{r}
+#Find optimal k
+# Define maximum number of k's
+K = 35
+# Declare a dataframe to store sequential values of k and the
+# corresponding accuracy
+k_acc <- data.frame(k = seq(1, K, 1), Accuracy = rep(0, K))
+
+# Loop through the value of k = 1 to k = K
+for(i in 1:K) {
+  k_pred <- knn(train = Train.n[, knn_data], test = Validation.n[, knn_data], cl = Train.n$IsProfitable, k = i)
+  k_acc[i, 2] <- confusionMatrix(k_pred, as.factor(Validation.n$IsProfitable))$overall[1] 
+}
+
+#Plot accuracy of each k
+plot(k_acc, type="b")
+
+
+```
+
+```{r}
+#Finding optimal k
+optk =which(k_acc$Accuracy==max(k_acc$Accuracy))
+optk
+
+```
+```{r}
+# Maximum accuracy
+max(k_acc$Accuracy)
+```
+```{r}
+# Obtain statistics for the optimal k.
+k_pred <- knn(train = Train.n[, knn_data], test = Validation.n[, knn_data], cl = Train.n$IsProfitable, k = 30)
+confusionMatrix(k_pred, as.factor(Validation.n$IsProfitable), positive="1")
+```
+```{r}
+#Regression tree.
+Tree <- rpart(NPV ~ .-OBS -CREDIT_EXTENDED, data=Train, method="anova", control = list(maxdepth = 2), cp = 0.00001)
+#Prune  the tree
+MinErrorCP<-Tree$cptable[which.min(Tree$cptable[,"xerror"]),"CP"]
+prunedTree <- prune(Tree, cp = MinErrorCP)
+fancyRpartPlot(prunedTree, caption = "")
+```
+```{r}
+#Find the regression tree errors
+TreeTrPred<-predict(prunedTree)
+TreeValPred <- predict(prunedTree, newdata = Validation)
+
+#rmse and mape
+accuracy(TreeTrPred,Train$NPV)
+accuracy(TreeValPred,Validation$NPV)
+```
+
+```{r}
+#Linear Regression
+
+lmodel <- lm(NPV ~ .-OBS - CREDIT_EXTENDED , data=Train)
+#Backwards elimination
+step.lm<-step(lmodel,direction="backward",trace=0)
+
+#Find the linear regression errors
+LRTrPred <- predict(step.lm)
+LRValPred <- predict(step.lm, newdata = Validation)
+
+#the rmse and mape
+accuracy(LRTrPred,Train$NPV)
+accuracy(LRValPred,Validation$NPV)
+```
+
+```{r}
+#kNN
+# Define maximum number of k's
+K = 35
+# Declare a dataframe to store sequential values of k and the
+# corresponding accuracy
+k_rmse <- data.frame(k = seq(1, K, 1), RMSE = rep(0, K))
+
+# Loop through the value of k = 1 to k = K
+for(i in 1:K) {
+  k_pred <- knn.reg(train = Train.n[, knn_data], test = Validation.n[, knn_data], y = Train.n$NPV, k = i)
+  k_rmse[i, 2] <- accuracy(k_pred$pred, Validation.n$NPV)[1,2] 
+}
+
+#Plot accuracy of each k
+plot(k_rmse, type="b")
+```
+```{r}
+#Find optimal k
+optk=which(k_rmse$RMSE==min(k_rmse$RMSE))
+optk
+```
+```{r}
+#Find the kNN errors
+k_pred <- knn.reg(train = Train.n[, knn_data], test = Train.n[, knn_data], y = Train.n$NPV, k = optk)
+accuracy(k_pred$pred, Train.n$NPV)
+kNNTrPred <- k_pred$pred
+k_pred <- knn.reg(train = Train.n[, knn_data], test = Validation.n[, knn_data], y = Train.n$NPV, k = optk)
+accuracy(k_pred$pred, Validation.n$NPV)
+kNNValPred<- k_pred$pred
+
+```
+
+```{r}
+# create empty NPV gained tables
+TrTrainNPV = c()
+TrValNPV = c()
+LRTrainNPV = c()
+LRValNPV = c()
+kNNTrainNPV = c()
+kNNValNPV = c()
+
+#Delcare cutoff range
+cutoff=seq(-2500,2000,100)
+```
+
+```{r}
+# compute accuracy per cutoff
+for (cut in cutoff){
+  #Regression Tree
+  #Sum of NPV all cases with predicted probability above the cutoff
+  TrainNPVCalc<-sum(ifelse(TreeTrPred>=cut,Train$NPV,0))
+  ValNPVCalc<-sum(ifelse(TreeValPred>=cut,Validation$NPV,0))
+  #Record NPV
+  TrTrainNPV = c(TrTrainNPV, TrainNPVCalc)
+  TrValNPV = c(TrValNPV, ValNPVCalc)
+  #Linear regression
+  TrainNPVCalc<-sum(ifelse(LRTrPred>=cut,Train$NPV,0))
+  ValNPVCalc<-sum(ifelse(LRValPred>=cut,Validation$NPV,0))
+  
+  LRTrainNPV = c(LRTrainNPV, TrainNPVCalc)
+  LRValNPV = c(LRValNPV, ValNPVCalc)
+  #kNN
+  TrainNPVCalc<-sum(ifelse(kNNTrPred>=cut,Train$NPV,0))
+  ValNPVCalc<-sum(ifelse(kNNValPred>=cut,Validation$NPV,0))
+  
+  kNNTrainNPV = c(kNNTrainNPV, TrainNPVCalc)
+  kNNValNPV = c(kNNValNPV, ValNPVCalc)
+}
+```
+```{r}
+#find the maximum NPV, cutoff, and total NPV for each method 
+#using validation data
+
+#Regression tree
+max(TrTrainNPV)
+MaxIndex=which(TrTrainNPV==max(TrTrainNPV))
+cutoff[MaxIndex]
+TrValNPV[MaxIndex]
+
+#Linear regression
+max(LRTrainNPV)
+MaxIndex=which(LRTrainNPV==max(LRTrainNPV))
+cutoff[MaxIndex]
+LRValNPV[MaxIndex]
+
+#kNN
+max(kNNTrainNPV)
+MaxIndex=which(kNNTrainNPV==max(kNNTrainNPV))
+cutoff[MaxIndex]
+kNNValNPV[MaxIndex]
+
+
+
+```
+```{r}
+#plot the results
+plot(cutoff, TrTrainNPV, xlab = "Cutoff Value", ylab = "Total NPV", ylim=c(-50000,300000),
+     main="Total NPV for all three methods", type = "l")
+lines(cutoff, TrValNPV, type = "l", lty = 2)
+lines(cutoff, LRTrainNPV, type = "l", lty = 3, col="blue")
+lines(cutoff, LRValNPV, type = "l", lty = 4, col="blue")
+lines(cutoff, kNNTrainNPV, type = "l", lty = 5, col="red")
+lines(cutoff, kNNValNPV, type = "l", lty = 6, col="red")
+abline(h=seq(-50000,300000,20000), col='grey', lty='dotted')
+legend("topright",  c("Tree Tr", "Tree Val", "LR Tr", "LR Val", "kNN Tr", "kNN Val"), lty = c(1, 2,3,4,5,6), col=c("black","black","blue","blue","red","red"), merge = TRUE, bty='n')
+```
+
+```{r}
+#Classification tree
+Tree <- rpart(IsProfitable ~ .-OBS -NPV -CREDIT_EXTENDED, data=Train, method="class", cp = 0.000001)
+
+#Prune tree
+MinErrorCP<-Tree$cptable[which.min(Tree$cptable[,"xerror"]),"CP"]
+prunedTree <- prune(Tree, cp = MinErrorCP)
+
+TreeTrPred<-predict(prunedTree)
+TreeValPred <- predict(prunedTree, newdata = Validation)
+
+#Predicted probability of being profitable
+TreeTrPred<-TreeTrPred[,2]
+TreeValPred <- TreeValPred[,2]
+```
+
+```{r}
+#Logistic Regression
+#Define model
+model <- glm(IsProfitable ~ .-OBS - CREDIT_EXTENDED -NPV, data=Train, family="binomial")
+#Backwards elimination
+step.lm<-step(model,direction="backward",trace=0)
+
+LRTrPred <- predict(step.lm, type="response")
+LRValPred <- predict(step.lm, type="response",newdata = Validation)
+```
+
+```{r}
+#kNN
+#Assuming optimal k is 21 as identified above
+#Get predicted probabilities from validation set
+knn_pred <- knn(train = Train.n[, knn_data], test = Validation.n[, knn_data] , 
+          cl = Train.n$IsProfitable, k = optk, prob = TRUE)
+kNNValPred<-attr(knn_pred,"prob")
+#Update the probabilities
+kNNValPred<-ifelse(knn_pred==0,1-kNNValPred,kNNValPred)
+#Get predicted probabilities from training set
+knn_pred <- knn(train = Train.n[, knn_data], test = Train.n[, knn_data] , 
+          cl = Train.n$IsProfitable, k = optk, prob = TRUE)
+kNNTrPred <- attr(knn_pred,"prob")
+kNNTrPred<-ifelse(knn_pred==0,1-kNNTrPred,kNNTrPred)
+```
+
+```{r}
+
+#Store predictions and outcomes as objects
+LRTrainPredObj<-prediction(LRTrPred,Train$IsProfitable)
+TreeTrainPredObj<-prediction(TreeTrPred,Train$IsProfitable)
+kNNTrainPredObj<-prediction(kNNTrPred,Train$IsProfitable)
+
+LRValPredObj<-prediction(LRValPred,Validation$IsProfitable)
+TreeValPredObj<-prediction(TreeValPred,Validation$IsProfitable)
+kNNValPredObj<-prediction(kNNValPred,Validation$IsProfitable)
+
+#step 2 is to get the performance and plot it: 
+par(pty="s")
+plot(performance(LRValPredObj,"tpr","fpr"),main="Validation data", xlab="1-specificity", ylab="sensitivity" )
+plot(performance(TreeValPredObj,"tpr","fpr"), add=TRUE, lty=2)
+plot(performance(kNNValPredObj,"tpr","fpr"), add=TRUE, lty=4)
+abline(0,1)
+legend("bottomright",  c("LR", "Tree", "kNN"), lty = c(1, 2,4), merge = TRUE,  bty='n')
+
+par(pty="s")
+plot(performance(LRTrainPredObj,"tpr","fpr"),main="Training data" )
+plot(performance(TreeTrainPredObj,"tpr","fpr"), add=TRUE, lty=2)
+plot(performance(kNNTrainPredObj,"tpr","fpr"), add=TRUE, lty=4)
+abline(0,1)
+legend("bottomright",  c("LR", "Tree", "kNN"), lty = c(1, 2,4), merge = TRUE,  bty='n')
+```
+```{r}
+#Compute AUC
+performance(LRTrainPredObj, measure = "auc")@y.values
+performance(TreeTrainPredObj, measure = "auc")@y.values
+performance(kNNTrainPredObj, measure = "auc")@y.values
+
+performance(LRValPredObj, measure = "auc")@y.values
+performance(TreeValPredObj, measure = "auc")@y.values
+performance(kNNValPredObj, measure = "auc")@y.values
+```
+
+```{r}
+#Create NPV gained tables
+TrTrainNPV = c()
+TrValNPV = c()
+LRTrainNPV = c()
+LRValNPV = c()
+kNNTrainNPV = c()
+kNNValNPV = c()
+
+# Calculate accuracy for each cutoff
+for (cut in seq(0,1,0.01)){
+  TrainNPVCalc<-sum(ifelse(TreeTrPred>=cut,Train$NPV,0))
+  ValNPVCalc<-sum(ifelse(TreeValPred>=cut,Validation$NPV,0))
+  #Record NPV
+  TrTrainNPV = c(TrTrainNPV, TrainNPVCalc)
+  TrValNPV = c(TrValNPV, ValNPVCalc)
+  #Linear regression
+  TrainNPVCalc<-sum(ifelse(LRTrPred>=cut,Train$NPV,0))
+  ValNPVCalc<-sum(ifelse(LRValPred>=cut,Validation$NPV,0))
+  
+  LRTrainNPV = c(LRTrainNPV, TrainNPVCalc)
+  LRValNPV = c(LRValNPV, ValNPVCalc)
+  #kNN
+  TrainNPVCalc<-sum(ifelse(kNNTrPred>=cut,Train$NPV,0))
+  ValNPVCalc<-sum(ifelse(kNNValPred>=cut,Validation$NPV,0))
+  
+  kNNTrainNPV = c(kNNTrainNPV, TrainNPVCalc)
+  kNNValNPV = c(kNNValNPV, ValNPVCalc)
+}
+```
+```{r}
+#Find maximum value index
+#Classification tree
+max(TrTrainNPV)
+MaxIndex=which(TrTrainNPV==max(TrTrainNPV))
+#Find the step-wise cut-off
+cutoff=seq(0,1,0.01)
+cutoff[MaxIndex]
+TrValNPV[MaxIndex]
+
+#Logistic regression
+max(LRTrainNPV)
+MaxIndex=which(LRTrainNPV==max(LRTrainNPV))
+cutoff=seq(0,1,0.01)
+cutoff[MaxIndex]
+LRValNPV[MaxIndex]
+
+#kNN
+max(kNNTrainNPV)
+MaxIndex=which(kNNTrainNPV==max(kNNTrainNPV))
+cutoff=seq(0,1,0.01)
+cutoff[MaxIndex]
+kNNValNPV[MaxIndex]
+
+```
+```{r}
+#plot the results
+plot(cutoff, TrTrainNPV, xlab = "Cutoff Value", ylab = "Total NPV", ylim=c(-50000,100000),
+     main="Total NPV for all three methods", type = "l")
+lines(cutoff, TrValNPV, type = "l", lty = 2)
+lines(cutoff, LRTrainNPV, type = "l", lty = 3, col="blue")
+lines(cutoff, LRValNPV, type = "l", lty = 4, col="blue")
+lines(cutoff, kNNTrainNPV, type = "l", lty = 5, col="red")
+lines(cutoff, kNNValNPV, type = "l", lty = 6, col="red")
+abline(h=seq(-60000,100000,20000), col='grey', lty='dotted')
+legend("topleft",  c("Tree Tr", "Tree Val", "LR Tr", "LR Val", "kNN Tr", "kNN Val"), lty = c(1, 2,3,4,5,6), col=c("black","black","blue","blue","red","red"), merge = TRUE, bty='n')
+```
+```
+
